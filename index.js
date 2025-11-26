@@ -735,6 +735,361 @@ app.delete('/api/wishlist/:email/:productId', async (req, res) => {
 });
 
 // ============================================
+// REVIEWS API ENDPOINTS
+// ============================================
+
+// GET reviews for a product
+app.get('/api/reviews/product/:productId', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const reviewsCollection = db.collection('reviews');
+
+    const { productId } = req.params;
+    const { page, limit, sort } = req.query;
+
+    if (!ObjectId.isValid(productId)) {
+      return res.status(400).json({ error: 'Invalid product ID' });
+    }
+
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 10;
+    const skip = (pageNum - 1) * limitNum;
+
+    // Sort options: newest, oldest, highest, lowest
+    let sortOption = { createdAt: -1 }; // default: newest first
+    if (sort === 'oldest') sortOption = { createdAt: 1 };
+    if (sort === 'highest') sortOption = { rating: -1, createdAt: -1 };
+    if (sort === 'lowest') sortOption = { rating: 1, createdAt: -1 };
+
+    const reviews = await reviewsCollection
+      .find({ productId })
+      .sort(sortOption)
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    const total = await reviewsCollection.countDocuments({ productId });
+
+    // Calculate rating stats
+    const stats = await reviewsCollection.aggregate([
+      { $match: { productId } },
+      {
+        $group: {
+          _id: null,
+          averageRating: { $avg: '$rating' },
+          totalReviews: { $sum: 1 },
+          rating5: { $sum: { $cond: [{ $eq: ['$rating', 5] }, 1, 0] } },
+          rating4: { $sum: { $cond: [{ $eq: ['$rating', 4] }, 1, 0] } },
+          rating3: { $sum: { $cond: [{ $eq: ['$rating', 3] }, 1, 0] } },
+          rating2: { $sum: { $cond: [{ $eq: ['$rating', 2] }, 1, 0] } },
+          rating1: { $sum: { $cond: [{ $eq: ['$rating', 1] }, 1, 0] } },
+        }
+      }
+    ]).toArray();
+
+    const ratingStats = stats[0] || {
+      averageRating: 0,
+      totalReviews: 0,
+      rating5: 0,
+      rating4: 0,
+      rating3: 0,
+      rating2: 0,
+      rating1: 0,
+    };
+
+    res.json({
+      reviews,
+      stats: {
+        averageRating: ratingStats.averageRating?.toFixed(1) || 0,
+        totalReviews: ratingStats.totalReviews,
+        distribution: {
+          5: ratingStats.rating5,
+          4: ratingStats.rating4,
+          3: ratingStats.rating3,
+          2: ratingStats.rating2,
+          1: ratingStats.rating1,
+        }
+      },
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching reviews:', error);
+    res.status(500).json({ error: 'Failed to fetch reviews', details: error.message });
+  }
+});
+
+// GET user's review for a product
+app.get('/api/reviews/user/:email/product/:productId', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const reviewsCollection = db.collection('reviews');
+
+    const { email, productId } = req.params;
+
+    const review = await reviewsCollection.findOne({
+      userEmail: decodeURIComponent(email),
+      productId
+    });
+
+    res.json({ review });
+  } catch (error) {
+    console.error('Error fetching user review:', error);
+    res.status(500).json({ error: 'Failed to fetch review', details: error.message });
+  }
+});
+
+// POST create a new review
+app.post('/api/reviews', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const reviewsCollection = db.collection('reviews');
+    const productsCollection = db.collection('products');
+
+    const { productId, userEmail, userName, userImage, rating, title, comment } = req.body;
+
+    // Validation
+    if (!productId || !userEmail || !rating) {
+      return res.status(400).json({ error: 'productId, userEmail, and rating are required' });
+    }
+
+    if (rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+    }
+
+    if (!ObjectId.isValid(productId)) {
+      return res.status(400).json({ error: 'Invalid product ID' });
+    }
+
+    // Check if user already reviewed this product
+    const existingReview = await reviewsCollection.findOne({
+      productId,
+      userEmail: decodeURIComponent(userEmail)
+    });
+
+    if (existingReview) {
+      return res.status(400).json({ error: 'You have already reviewed this product' });
+    }
+
+    const newReview = {
+      productId,
+      userEmail,
+      userName: userName || 'Anonymous',
+      userImage: userImage || '',
+      rating: parseInt(rating),
+      title: title || '',
+      comment: comment || '',
+      helpful: 0,
+      verified: false, // Could be set based on purchase history
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await reviewsCollection.insertOne(newReview);
+
+    // Update product's average rating
+    const stats = await reviewsCollection.aggregate([
+      { $match: { productId } },
+      {
+        $group: {
+          _id: null,
+          averageRating: { $avg: '$rating' },
+          totalReviews: { $sum: 1 }
+        }
+      }
+    ]).toArray();
+
+    if (stats[0]) {
+      await productsCollection.updateOne(
+        { _id: new ObjectId(productId) },
+        {
+          $set: {
+            rating: parseFloat(stats[0].averageRating.toFixed(1)),
+            reviews: stats[0].totalReviews,
+            updatedAt: new Date()
+          }
+        }
+      );
+    }
+
+    res.status(201).json({
+      message: 'Review submitted successfully',
+      review: { ...newReview, _id: result.insertedId }
+    });
+  } catch (error) {
+    console.error('Error creating review:', error);
+    res.status(500).json({ error: 'Failed to create review', details: error.message });
+  }
+});
+
+// PUT update a review
+app.put('/api/reviews/:id', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const reviewsCollection = db.collection('reviews');
+    const productsCollection = db.collection('products');
+
+    const { id } = req.params;
+    const { userEmail, rating, title, comment } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid review ID' });
+    }
+
+    // Find the review and verify ownership
+    const review = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!review) {
+      return res.status(404).json({ error: 'Review not found' });
+    }
+
+    if (review.userEmail !== decodeURIComponent(userEmail)) {
+      return res.status(403).json({ error: 'You can only edit your own reviews' });
+    }
+
+    const updateData = { updatedAt: new Date() };
+    if (rating !== undefined) {
+      if (rating < 1 || rating > 5) {
+        return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+      }
+      updateData.rating = parseInt(rating);
+    }
+    if (title !== undefined) updateData.title = title;
+    if (comment !== undefined) updateData.comment = comment;
+
+    await reviewsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    // Update product's average rating
+    const stats = await reviewsCollection.aggregate([
+      { $match: { productId: review.productId } },
+      {
+        $group: {
+          _id: null,
+          averageRating: { $avg: '$rating' },
+          totalReviews: { $sum: 1 }
+        }
+      }
+    ]).toArray();
+
+    if (stats[0]) {
+      await productsCollection.updateOne(
+        { _id: new ObjectId(review.productId) },
+        {
+          $set: {
+            rating: parseFloat(stats[0].averageRating.toFixed(1)),
+            reviews: stats[0].totalReviews,
+            updatedAt: new Date()
+          }
+        }
+      );
+    }
+
+    const updatedReview = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+
+    res.json({
+      message: 'Review updated successfully',
+      review: updatedReview
+    });
+  } catch (error) {
+    console.error('Error updating review:', error);
+    res.status(500).json({ error: 'Failed to update review', details: error.message });
+  }
+});
+
+// DELETE a review
+app.delete('/api/reviews/:id', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const reviewsCollection = db.collection('reviews');
+    const productsCollection = db.collection('products');
+
+    const { id } = req.params;
+    const { userEmail } = req.query;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid review ID' });
+    }
+
+    // Find the review and verify ownership
+    const review = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!review) {
+      return res.status(404).json({ error: 'Review not found' });
+    }
+
+    if (review.userEmail !== decodeURIComponent(userEmail)) {
+      return res.status(403).json({ error: 'You can only delete your own reviews' });
+    }
+
+    const productId = review.productId;
+
+    await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    // Update product's average rating
+    const stats = await reviewsCollection.aggregate([
+      { $match: { productId } },
+      {
+        $group: {
+          _id: null,
+          averageRating: { $avg: '$rating' },
+          totalReviews: { $sum: 1 }
+        }
+      }
+    ]).toArray();
+
+    const newRating = stats[0]?.averageRating || 0;
+    const newReviewCount = stats[0]?.totalReviews || 0;
+
+    await productsCollection.updateOne(
+      { _id: new ObjectId(productId) },
+      {
+        $set: {
+          rating: parseFloat(newRating.toFixed(1)),
+          reviews: newReviewCount,
+          updatedAt: new Date()
+        }
+      }
+    );
+
+    res.json({ message: 'Review deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting review:', error);
+    res.status(500).json({ error: 'Failed to delete review', details: error.message });
+  }
+});
+
+// POST mark review as helpful
+app.post('/api/reviews/:id/helpful', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const reviewsCollection = db.collection('reviews');
+
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid review ID' });
+    }
+
+    await reviewsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $inc: { helpful: 1 } }
+    );
+
+    res.json({ message: 'Marked as helpful' });
+  } catch (error) {
+    console.error('Error marking review as helpful:', error);
+    res.status(500).json({ error: 'Failed to mark as helpful', details: error.message });
+  }
+});
+
+// ============================================
 // SEED ENDPOINT (for development)
 // ============================================
 app.post('/api/seed', async (req, res) => {
@@ -788,6 +1143,13 @@ async function connectDB() {
     // Wishlist indexes
     const wishlistsCollection = db.collection('wishlists');
     await wishlistsCollection.createIndex({ userEmail: 1 }, { unique: true });
+    
+    // Reviews indexes
+    const reviewsCollection = db.collection('reviews');
+    await reviewsCollection.createIndex({ productId: 1 });
+    await reviewsCollection.createIndex({ userEmail: 1 });
+    await reviewsCollection.createIndex({ productId: 1, userEmail: 1 }, { unique: true });
+    await reviewsCollection.createIndex({ createdAt: -1 });
     
     console.log(`📦 Database "${DB_NAME}" ready`);
     
@@ -848,6 +1210,12 @@ connectDB().then(async () => {
     console.log(`   PUT    /api/wishlist/:email`);
     console.log(`   POST   /api/wishlist/:email/add`);
     console.log(`   DELETE /api/wishlist/:email/:productId`);
+    console.log(`   GET    /api/reviews/product/:productId`);
+    console.log(`   GET    /api/reviews/user/:email/product/:productId`);
+    console.log(`   POST   /api/reviews`);
+    console.log(`   PUT    /api/reviews/:id`);
+    console.log(`   DELETE /api/reviews/:id`);
+    console.log(`   POST   /api/reviews/:id/helpful`);
     console.log(`   POST   /api/seed`);
     console.log(`\n💡 Run 'node seed.js' to reseed database manually\n`);
   });
