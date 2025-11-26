@@ -560,6 +560,181 @@ app.delete('/api/orders/:id', async (req, res) => {
 });
 
 // ============================================
+// CART API ENDPOINTS
+// ============================================
+
+// GET user's cart
+app.get('/api/cart/:email', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const cartsCollection = db.collection('carts');
+
+    const { email } = req.params;
+    const cart = await cartsCollection.findOne({ userEmail: decodeURIComponent(email) });
+
+    res.json({ items: cart?.items || [] });
+  } catch (error) {
+    console.error('Error fetching cart:', error);
+    res.status(500).json({ error: 'Failed to fetch cart', details: error.message });
+  }
+});
+
+// PUT update user's cart (replace entire cart)
+app.put('/api/cart/:email', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const cartsCollection = db.collection('carts');
+
+    const { email } = req.params;
+    const { items } = req.body;
+
+    const result = await cartsCollection.updateOne(
+      { userEmail: decodeURIComponent(email) },
+      { 
+        $set: { 
+          items: items || [],
+          updatedAt: new Date()
+        },
+        $setOnInsert: { createdAt: new Date() }
+      },
+      { upsert: true }
+    );
+
+    res.json({ message: 'Cart updated successfully', items });
+  } catch (error) {
+    console.error('Error updating cart:', error);
+    res.status(500).json({ error: 'Failed to update cart', details: error.message });
+  }
+});
+
+// DELETE clear user's cart
+app.delete('/api/cart/:email', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const cartsCollection = db.collection('carts');
+
+    const { email } = req.params;
+    
+    await cartsCollection.updateOne(
+      { userEmail: decodeURIComponent(email) },
+      { $set: { items: [], updatedAt: new Date() } }
+    );
+
+    res.json({ message: 'Cart cleared successfully' });
+  } catch (error) {
+    console.error('Error clearing cart:', error);
+    res.status(500).json({ error: 'Failed to clear cart', details: error.message });
+  }
+});
+
+// ============================================
+// WISHLIST API ENDPOINTS
+// ============================================
+
+// GET user's wishlist
+app.get('/api/wishlist/:email', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const wishlistsCollection = db.collection('wishlists');
+
+    const { email } = req.params;
+    const wishlist = await wishlistsCollection.findOne({ userEmail: decodeURIComponent(email) });
+
+    res.json({ items: wishlist?.items || [] });
+  } catch (error) {
+    console.error('Error fetching wishlist:', error);
+    res.status(500).json({ error: 'Failed to fetch wishlist', details: error.message });
+  }
+});
+
+// PUT update user's wishlist (replace entire wishlist)
+app.put('/api/wishlist/:email', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const wishlistsCollection = db.collection('wishlists');
+
+    const { email } = req.params;
+    const { items } = req.body;
+
+    await wishlistsCollection.updateOne(
+      { userEmail: decodeURIComponent(email) },
+      { 
+        $set: { 
+          items: items || [],
+          updatedAt: new Date()
+        },
+        $setOnInsert: { createdAt: new Date() }
+      },
+      { upsert: true }
+    );
+
+    res.json({ message: 'Wishlist updated successfully', items });
+  } catch (error) {
+    console.error('Error updating wishlist:', error);
+    res.status(500).json({ error: 'Failed to update wishlist', details: error.message });
+  }
+});
+
+// POST add item to wishlist
+app.post('/api/wishlist/:email/add', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const wishlistsCollection = db.collection('wishlists');
+
+    const { email } = req.params;
+    const { product } = req.body;
+
+    const wishlist = await wishlistsCollection.findOne({ userEmail: decodeURIComponent(email) });
+    const items = wishlist?.items || [];
+    
+    // Check if already exists
+    const exists = items.some(item => item._id === product._id);
+    if (exists) {
+      return res.json({ message: 'Item already in wishlist', items });
+    }
+
+    items.push(product);
+
+    await wishlistsCollection.updateOne(
+      { userEmail: decodeURIComponent(email) },
+      { 
+        $set: { items, updatedAt: new Date() },
+        $setOnInsert: { createdAt: new Date() }
+      },
+      { upsert: true }
+    );
+
+    res.json({ message: 'Item added to wishlist', items });
+  } catch (error) {
+    console.error('Error adding to wishlist:', error);
+    res.status(500).json({ error: 'Failed to add to wishlist', details: error.message });
+  }
+});
+
+// DELETE remove item from wishlist
+app.delete('/api/wishlist/:email/:productId', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const wishlistsCollection = db.collection('wishlists');
+
+    const { email, productId } = req.params;
+
+    const wishlist = await wishlistsCollection.findOne({ userEmail: decodeURIComponent(email) });
+    const items = (wishlist?.items || []).filter(item => item._id !== productId);
+
+    await wishlistsCollection.updateOne(
+      { userEmail: decodeURIComponent(email) },
+      { $set: { items, updatedAt: new Date() } }
+    );
+
+    res.json({ message: 'Item removed from wishlist', items });
+  } catch (error) {
+    console.error('Error removing from wishlist:', error);
+    res.status(500).json({ error: 'Failed to remove from wishlist', details: error.message });
+  }
+});
+
+// ============================================
 // SEED ENDPOINT (for development)
 // ============================================
 app.post('/api/seed', async (req, res) => {
@@ -605,6 +780,14 @@ async function connectDB() {
     await ordersCollection.createIndex({ userEmail: 1 });
     await ordersCollection.createIndex({ status: 1 });
     await ordersCollection.createIndex({ createdAt: -1 });
+    
+    // Cart indexes
+    const cartsCollection = db.collection('carts');
+    await cartsCollection.createIndex({ userEmail: 1 }, { unique: true });
+    
+    // Wishlist indexes
+    const wishlistsCollection = db.collection('wishlists');
+    await wishlistsCollection.createIndex({ userEmail: 1 }, { unique: true });
     
     console.log(`📦 Database "${DB_NAME}" ready`);
     
@@ -658,6 +841,13 @@ connectDB().then(async () => {
     console.log(`   GET    /api/orders/user/:email`);
     console.log(`   PUT    /api/orders/:id/status`);
     console.log(`   DELETE /api/orders/:id`);
+    console.log(`   GET    /api/cart/:email`);
+    console.log(`   PUT    /api/cart/:email`);
+    console.log(`   DELETE /api/cart/:email`);
+    console.log(`   GET    /api/wishlist/:email`);
+    console.log(`   PUT    /api/wishlist/:email`);
+    console.log(`   POST   /api/wishlist/:email/add`);
+    console.log(`   DELETE /api/wishlist/:email/:productId`);
     console.log(`   POST   /api/seed`);
     console.log(`\n💡 Run 'node seed.js' to reseed database manually\n`);
   });
