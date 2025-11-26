@@ -64,6 +64,7 @@ app.get('/api/products', async (req, res) => {
     
     const products = await productsCollection
       .find(filter)
+      .sort({ createdAt: -1 })  // Sort by newest first
       .skip(skip)
       .limit(limitNum)
       .toArray();
@@ -289,6 +290,33 @@ app.delete('/api/products/:id', async (req, res) => {
   } catch (error) {
     console.error('Error deleting product:', error);
     res.status(500).json({ error: 'Failed to delete product', details: error.message });
+  }
+});
+
+// GET products by user (createdBy)
+app.get('/api/products/user/:email', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const productsCollection = db.collection('products');
+    
+    const { email } = req.params;
+    
+    if (!email) {
+      return res.status(400).json({ error: 'User email is required' });
+    }
+    
+    const products = await productsCollection
+      .find({ createdBy: email })
+      .sort({ createdAt: -1 })
+      .toArray();
+    
+    res.json({
+      products,
+      total: products.length
+    });
+  } catch (error) {
+    console.error('Error fetching user products:', error);
+    res.status(500).json({ error: 'Failed to fetch user products', details: error.message });
   }
 });
 
