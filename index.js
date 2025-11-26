@@ -348,6 +348,218 @@ app.post('/api/users', async (req, res) => {
 });
 
 // ============================================
+// ORDERS API ENDPOINTS
+// ============================================
+
+// POST create new order
+app.post('/api/orders', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const ordersCollection = db.collection('orders');
+
+    const {
+      userEmail,
+      items,
+      shippingAddress,
+      paymentMethod,
+      subtotal,
+      shipping,
+      total,
+      notes
+    } = req.body;
+
+    // Validation
+    if (!userEmail || !items || !shippingAddress || !paymentMethod) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: userEmail, items, shippingAddress, paymentMethod' 
+      });
+    }
+
+    const newOrder = {
+      userEmail,
+      items,
+      shippingAddress,
+      paymentMethod,
+      paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
+      subtotal: parseFloat(subtotal) || 0,
+      shipping: parseFloat(shipping) || 0,
+      total: parseFloat(total) || 0,
+      notes: notes || '',
+      status: 'pending',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await ordersCollection.insertOne(newOrder);
+
+    res.status(201).json({
+      message: 'Order created successfully',
+      orderId: result.insertedId,
+      order: { ...newOrder, _id: result.insertedId }
+    });
+  } catch (error) {
+    console.error('Error creating order:', error);
+    res.status(500).json({ error: 'Failed to create order', details: error.message });
+  }
+});
+
+// GET all orders (admin)
+app.get('/api/orders', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const ordersCollection = db.collection('orders');
+
+    const { status, page, limit } = req.query;
+
+    let filter = {};
+    if (status) filter.status = status;
+
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    const orders = await ordersCollection
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    const total = await ordersCollection.countDocuments(filter);
+
+    res.json({
+      orders,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching orders:', error);
+    res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
+  }
+});
+
+// GET orders by user email
+app.get('/api/orders/user/:email', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const ordersCollection = db.collection('orders');
+
+    const { email } = req.params;
+
+    const orders = await ordersCollection
+      .find({ userEmail: decodeURIComponent(email) })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ orders });
+  } catch (error) {
+    console.error('Error fetching user orders:', error);
+    res.status(500).json({ error: 'Failed to fetch orders', details: error.message });
+  }
+});
+
+// GET single order by ID
+app.get('/api/orders/:id', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const ordersCollection = db.collection('orders');
+
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json(order);
+  } catch (error) {
+    console.error('Error fetching order:', error);
+    res.status(500).json({ error: 'Failed to fetch order', details: error.message });
+  }
+});
+
+// PUT update order status
+app.put('/api/orders/:id/status', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const ordersCollection = db.collection('orders');
+
+    const { id } = req.params;
+    const { status, paymentStatus } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    const validStatuses = ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const updateData = { updatedAt: new Date() };
+    if (status) updateData.status = status;
+    if (paymentStatus) updateData.paymentStatus = paymentStatus;
+
+    const result = await ordersCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const updatedOrder = await ordersCollection.findOne({ _id: new ObjectId(id) });
+
+    res.json({
+      message: 'Order updated successfully',
+      order: updatedOrder
+    });
+  } catch (error) {
+    console.error('Error updating order:', error);
+    res.status(500).json({ error: 'Failed to update order', details: error.message });
+  }
+});
+
+// DELETE cancel order
+app.delete('/api/orders/:id', async (req, res) => {
+  try {
+    const db = client.db(DB_NAME);
+    const ordersCollection = db.collection('orders');
+
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    // Instead of deleting, mark as cancelled
+    const result = await ordersCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: 'cancelled', updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    res.json({ message: 'Order cancelled successfully' });
+  } catch (error) {
+    console.error('Error cancelling order:', error);
+    res.status(500).json({ error: 'Failed to cancel order', details: error.message });
+  }
+});
+
+// ============================================
 // SEED ENDPOINT (for development)
 // ============================================
 app.post('/api/seed', async (req, res) => {
@@ -387,6 +599,12 @@ async function connectDB() {
     await productsCollection.createIndex({ subcategory: 1 });
     await productsCollection.createIndex({ brand: 1 });
     await productsCollection.createIndex({ title: 'text', shortDescription: 'text' });
+    
+    // Orders indexes
+    const ordersCollection = db.collection('orders');
+    await ordersCollection.createIndex({ userEmail: 1 });
+    await ordersCollection.createIndex({ status: 1 });
+    await ordersCollection.createIndex({ createdAt: -1 });
     
     console.log(`📦 Database "${DB_NAME}" ready`);
     
@@ -434,6 +652,12 @@ connectDB().then(async () => {
     console.log(`   PUT    /api/products/:id`);
     console.log(`   DELETE /api/products/:id`);
     console.log(`   POST   /api/users`);
+    console.log(`   POST   /api/orders`);
+    console.log(`   GET    /api/orders`);
+    console.log(`   GET    /api/orders/:id`);
+    console.log(`   GET    /api/orders/user/:email`);
+    console.log(`   PUT    /api/orders/:id/status`);
+    console.log(`   DELETE /api/orders/:id`);
     console.log(`   POST   /api/seed`);
     console.log(`\n💡 Run 'node seed.js' to reseed database manually\n`);
   });
